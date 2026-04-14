@@ -1,4 +1,5 @@
-setwd("~/Documents/Maldives/Analyses/sigma")
+library(ggspatial)
+library(ggplot2)
 
 # Functions
 fit_gamma_pars = function(par, obs_quantiles, p_thresholds=c(0.025,0.5,0.975)) {
@@ -21,6 +22,19 @@ approx_gamma_pars<-function(par = NULL, obs_quantiles, p_thresholds=c(0.025,0.5,
                 p_thresholds)$par
   return(params)
 }
+fit_lnorm_pars = function(par, obs_quantiles, p_thresholds=c(0.025,0.5,0.975)) {
+  p_quantiles = plnorm(obs_quantiles, meanlog = par[1], sdlog = par[2])
+  statistic = max(abs(p_quantiles - p_thresholds))
+  return(statistic)
+} 
+approx_lnorm_pars<-function(par = c(mean(log(obs_quantiles)), sd(log(obs_quantiles))), obs_quantiles, p_thresholds=c(0.025,0.5,0.975)) {
+  params<-optim(par, 
+                fit_lnorm_pars, 
+                par,
+                obs_quantiles,
+                p_thresholds)$par
+  return(params)
+}
 
 # Effective population size data
 Ne_estimates <- subset(read.csv("ne_m1_m2.csv", stringsAsFactors = FALSE), Population == "M2")
@@ -35,53 +49,51 @@ hist(NE)
 # Effective density  data
 DE <- NE/Ne_estimates$Area
 hist(DE)
-quantile(DE, c(0.025, 0.5, 0.975))
+quantile(DE, c(0.25, 0.5, 0.75))
 
 # IBD regression slope data
-beta_quantiles <- c(0.00051525, 0.0010305, 0.002061) # M1
-beta_quantiles <- c(0.000265071 , 0.000530142, 0.001060284) # M2
+#beta_quantiles <- c(2.8e-08, 5.28e-08, 10.7e-08) # M1
+beta_quantiles <- c(1.2e-08 , 5.84e-08, 4.8e-08) # M2
 
-ln_beta_q <- log(beta_quantiles)
-meanlog <- ln_beta_q[2]
-sdlog <- (ln_beta_q[3] - ln_beta_q[1]) / (2*1.96)
 n_sims <- 10000
-beta <- rlnorm(n_sims, meanlog=meanlog, sdlog=sdlog)
+beta_mean<-approx_lnorm_pars(obs_quantiles=beta_quantiles)[[1]]
+beta_variance<-approx_lnorm_pars(obs_quantiles=beta_quantiles)[[2]]
+beta<-rlnorm(n_sims, beta_mean, beta_variance)
 hist(beta)
-quantile(beta, c(0.025, 0.5, 0.975))
+quantile(beta, c(0.25, 0.5, 0.75))
 
-# sigma and neighborhood size data
-sigma<-sqrt(1/(4*3.14*DE*beta))
+# Sigma and neighborhood size data
+sigma<-sqrt(1/(4*DE*beta))
 hist(sigma)
-quantile(sigma, c(0.025, 0.5, 0.975))
-Neighborhood<-4*3.14*DE*sigma^2
-quantile(Neighborhood, c(0.025, 0.5, 0.975))
+quantile(sigma, c(0.25, 0.5, 0.75))
+Neighborhood<-1/beta
+quantile(Neighborhood, c(0.25, 0.5, 0.75))
 
 # Laplace kernel data
-sigma_q <- quantile(sigma, probs=c(0.025, 0.5, 0.975))
-distance <- seq(0, 150000, 10)
+sigma_q <- quantile(sigma, probs=c(0.25, 0.5, 0.75))
+distance <- seq(0, 100000, 10)
 
-laplace_med  <- (distance / sigma_q[2]^2) * exp(-distance / sigma_q[2])
-laplace_low  <- (distance / sigma_q[1]^2) * exp(-distance / sigma_q[1])
-laplace_high <- (distance / sigma_q[3]^2) * exp(-distance / sigma_q[3])
+laplace_all <- sapply(sigma_q, function(s) {
+  (1/(2*s)) * exp(-distance / s)
+})
 
 kernel_df <- data.frame(
   distance = distance,
-  median   = laplace_med,
-  lower    = laplace_low,
-  upper    = laplace_high)
+  median = apply(laplace_all, 1, median),
+  lower  = apply(laplace_all, 1, quantile, 0.025),
+  upper  = apply(laplace_all, 1, quantile, 0.975))
 
-sigma_med <- median(sigma)
 probs <- c(0.5, 0.75, 0.95, 0.99)
-radii <- qgamma(probs, shape = 2, scale = sigma_med)
 
-median_distances <- qgamma(0.5, shape = 2, scale = sigma)
-quantile(median_distances, c(0.025, 0.5, 0.975))
+radii_all <- sapply(probs, function(p) {
+  -sigma_q * log(1 - p)
+})
+apply(radii_all, 2, quantile, c(0.25, 0.5, 0.75))
+radii <- apply(radii_all, 2, median)
 
 ggplot(kernel_df, aes(x = distance, y = median)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper),
-              fill = "lightgray", alpha = 0.7) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightgray", alpha = 0.7) +
   geom_line(color = "gray40") +
-  # Add vertical lines for each radii
   geom_vline(xintercept = radii, linetype = "dashed", color = "darkorange", size = 1) +
   ylab("Dispersal probability density") +
   xlab("Dispersal distance (m)") +
@@ -97,8 +109,8 @@ library(dplyr)
 reef <- st_sfc(st_point(c(73.5, 1.75)), crs = 4326) |> st_sf(name="reef")
 
 # radii in meters
-colors <- c("salmon", "lightsalmon", "#f4b480", "#f9d8b0")  # dark → light orange
-colors <- c("goldenrod", "#f0c542", "lightgoldenrod", "#fff2b3")  # dark → light orange
+#colors <- c("salmon", "lightsalmon", "#f4b480", "#f9d8b0")  # M1
+colors <- c("goldenrod", "#f0c542", "lightgoldenrod", "#fff2b3")  # M2
 
 # transform to projected CRS for meter buffering (e.g., UTM zone 42S ~ Maldives)
 reef_proj <- st_transform(reef, 32742)  # EPSG:32742, UTM Zone 42S
@@ -112,11 +124,12 @@ circles <- lapply(seq_along(radii), function(i) {
 })
 circles <- do.call(rbind, circles)
 
-
 # back to lon/lat
 circles <- st_transform(circles, 4326)
 
 # plot
+my_sf <- read_sf("/Users/zoemeziere/Documents/Maldives/Coordinates/Maldives-20251212092006/Reef-Extent/reefextent.geojson")
+
 ggplot() + 
   geom_sf(data = circles, aes(fill = fill), color = NA, alpha = 0.5) +
   geom_sf(data = my_sf, color="grey30", fill = "grey60") +
